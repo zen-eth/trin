@@ -1,4 +1,7 @@
-use std::{sync::Arc, thread::sleep, time::Instant};
+use std::{fs, sync::Arc, thread::sleep, time::Instant};
+use std::fs::File;
+use std::io::{BufReader, Read, Write};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use clap::Parser;
 use e2store::{era1::Era1, utils::get_era1_files};
@@ -14,12 +17,9 @@ use portal_bridge::{
     bridge::{history::SERVE_BLOCK_TIMEOUT, utils::lookup_epoch_acc},
 };
 use reqwest::Client;
-use tokio::{
-    sync::{OwnedSemaphorePermit, Semaphore},
-    task::JoinHandle,
-    time::timeout,
-};
+use tokio::{sync::{OwnedSemaphorePermit, Semaphore}, task::JoinHandle, time::timeout};
 use tracing::{debug, error, info, warn, Instrument};
+use url::Url;
 use trin_bench::cli::TrinBenchConfig;
 use trin_execution::era::utils::download_raw_era;
 use trin_utils::log::init_tracing_logger;
@@ -57,20 +57,51 @@ async fn main() -> anyhow::Result<()> {
     // will assume a 100% radius by default
     // send_node_client.ping(receiver_node_enr.clone()).await?;
 
-    let http_client = Client::new();
-    let era1_files = get_era1_files(&http_client).await?;
+    // get the era1 files
+
+
     let mut blocks = vec![];
-    for era1_index in trin_bench_config.start_era1..=trin_bench_config.end_era1 {
-        let era1_path = era1_files[&(era1_index as u64)].clone();
-        let raw_era1 = download_raw_era(era1_path, http_client.clone()).await?;
-        let block_tuples = Era1::deserialize(&raw_era1)?;
-        blocks.extend(block_tuples.block_tuples);
+
+    let folder_path_str = "./era1";
+    let folder_path = Path::new(folder_path_str);
+    if folder_path.exists() {
+        info!("folder path: {}", fs::canonicalize(folder_path)?.display());
+        for entry in fs::read_dir(folder_path_str)? {
+            let entry = entry?;
+            let path = entry.path();
+
+            if path.is_file() {
+                let mut file = File::open(&path)?;
+                info!("read era1 data from File: {}", path.file_name().unwrap().to_str().unwrap());
+                let mut era1_file_buf : Vec<u8> = Vec::new();
+                file.read_to_end(era1_file_buf.by_ref())?;
+                let block_tuples = Era1::deserialize(&era1_file_buf)?;
+                blocks.extend(block_tuples.block_tuples);
+            }
+        }
+    } else {
+        let http_client = Client::new();
+        let era1_files = get_era1_files(&http_client).await?;
+        for era1_index in trin_bench_config.start_era1..=trin_bench_config.end_era1 {
+            let era1_path = era1_files[&(era1_index as u64)].clone();
+            let raw_era1 = download_raw_era(era1_path.clone(), http_client.clone()).await?;
+            let url = Url::parse(era1_path.as_str()).expect("Invalid era1 URL");
+            let file_name = url.path_segments().and_then(|segments| segments.last()).expect("can't get file name in url");
+            let file_path = Path::new(folder_path).join(file_name);
+            if !file_path.exists() {
+                let mut file = File::create(file_path)?;
+                file.write_all(raw_era1.clone().iter().as_slice()).expect("write file failed");
+            }
+            let block_tuples = Era1::deserialize(&raw_era1)?;
+            blocks.extend(block_tuples.block_tuples);
+        }
     }
 
     info!("Beginning benchmark");
     let start_timer = Instant::now();
     let mut offer_count = 0;
 
+    info!("gossip concurrency limit: {}", trin_bench_config.offer_concurrency);
     // gossip blocks to receiver node
     let gossip_semaphore = Arc::new(Semaphore::new(trin_bench_config.offer_concurrency));
     let header_oracle = HeaderOracle::default();

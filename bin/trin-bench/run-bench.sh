@@ -111,8 +111,10 @@ run_shisui() {
   --rpc.port "$rpc_port" \
   --udp.port "$discovery_port" \
   --data.dir "$data_dir" \
+  --utp-conn-size-limit "500" \
   --pprof --pprof.port "$pprof_port" > "$log_file.log" 2>&1 &
 
+  echo "pprof port: $pprof_port"
   echo "Shisui started with PID: $!"
   PIDS+=("$!")
 }
